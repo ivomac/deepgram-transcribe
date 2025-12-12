@@ -1,0 +1,15 @@
+[project]
+name = "transcribe"
+version = "0.1.0"
+description = "transcription scripts using deepgram"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "deepgram-sdk==4.1.0",
+    "litellm>=1.52.13",
+    "pyaudio>=0.2.14",
+    "pyperclip>=1.9.0",
+]
+
+[project.scripts]
+transcribe = "transcribe:main"

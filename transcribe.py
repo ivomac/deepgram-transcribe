@@ -78,7 +78,7 @@ def cleanup_transcript(transcript: str, model: str) -> str:
             ],
         )
 
-        return response.choices[0].message.content
+        return str(response.choices[0].message.content)
 
     except ImportError:
         print("Warning: litellm not installed, skipping AI cleanup", file=sys.stderr)
@@ -114,23 +114,6 @@ def cleanup_pid():
     """Remove PID file."""
     PID_FILE.unlink(missing_ok=True)
 
-
-def format_transcript(data, fmt):
-    """Format Deepgram JSON."""
-    results = []
-
-    utterances = data.results.utterances
-    for utt in utterances:
-        fields = {
-            "text": utt.transcript.strip(),
-            "start": utt.start,
-            "end": utt.end,
-            "speaker": utt.speaker,
-        }
-
-        results.append(fmt.format(**fields))
-
-    return "\n".join(results)
 
 
 def signal_handler(*_):
@@ -192,7 +175,7 @@ class Transcriber:
 
         return " ".join(transcript)
 
-    def from_file(self, audio_file: str) -> str:
+    def from_file(self, audio_file: str, fmt: str) -> str:
         with open(audio_file, "rb") as file:
             buffer_data = file.read()
 
@@ -208,7 +191,21 @@ class Transcriber:
             diarize=True,
         )
 
-        return self.client.listen.rest.v("1").transcribe_file(payload, options)
+        data = self.client.listen.rest.v("1").transcribe_file(payload, options)
+
+        sentences = []
+
+        for utt in data.results.utterances:
+            fields = {
+                "text": utt.transcript.strip(),
+                "start": utt.start,
+                "end": utt.end,
+                "speaker": utt.speaker,
+            }
+
+            sentences.append(fmt.format(**fields))
+
+        return "\n".join(sentences)
 
 
 def main():
@@ -252,8 +249,7 @@ def main():
         notify("Transcribe", "Transcribing...")
         transcriber = Transcriber()
         if args.file:
-            transcript = transcriber.from_file(args.file)
-            transcript = format_transcript(transcript, fmt=args.format)
+            transcript = transcriber.from_file(args.file, args.fmt)
         else:
             transcript = transcriber.from_mic()
 
@@ -263,6 +259,7 @@ def main():
                 transcript = cleanup_transcript(transcript, model=args.model)
 
             copy_to_clipboard(transcript)
+            print(transcript)
             notify("Transcribe", "Transcription copied to clipboard")
         else:
             notify("Transcribe", "No transcription recorded")

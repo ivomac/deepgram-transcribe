@@ -1,19 +1,16 @@
 #!/usr/bin/env python
+"""Record audio from PulseAudio/PipeWire sources."""
 
 import signal
 import subprocess
+import sys
+import tempfile
+from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
 from os import environ
-import tempfile
 
-recording_data = []
-is_recording = False
-
-
-def audio_callback(indata, *_):
-    """Callback for audio recording."""
-    recording_data.append(indata.copy())
+is_recording = True
 
 
 def stop_recording(*_):
@@ -26,7 +23,8 @@ signal.signal(signal.SIGINT, stop_recording)
 signal.signal(signal.SIGTERM, stop_recording)
 
 
-def get_default_sources():
+def get_default_sources() -> tuple[str | None, str | None]:
+    """Get default mic and system audio sources from PulseAudio."""
     result = subprocess.check_output(["pactl", "info"], text=True)
 
     default_sink = None
@@ -39,87 +37,26 @@ def get_default_sources():
             default_source = line.split(":", 1)[1].strip()
 
     system_source = f"{default_sink}.monitor" if default_sink else None
-
     return default_source, system_source
 
 
-def record_source(
-    source: str,
-    output_file: Path,
-    sample_rate: int = 16000,
-    channels: int = 1,
-):
-    try:
-        parec_cmd = [
-            "parec",
-            "--device",
-            source,
-            "--rate",
-            str(sample_rate),
-            "--channels",
-            str(channels),
-            "--format",
-            "s16le",
-        ]
-
-        parec_proc = subprocess.Popen(parec_cmd, stdout=subprocess.PIPE)
-
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-f",
-            "s16le",
-            "-ar",
-            str(sample_rate),
-            "-ac",
-            str(channels),
-            "-i",
-            "pipe:0",
-            "-y",
-            str(output_file),
-        ]
-
-        ffmpeg_proc = subprocess.Popen(
-            ffmpeg_cmd,
-            stdin=parec_proc.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        if parec_proc.stdout:
-            parec_proc.stdout.close()
-
-        ffmpeg_proc.wait()
-
-    except KeyboardInterrupt:
-        if parec_proc:
-            parec_proc.terminate()
-        if ffmpeg_proc:
-            ffmpeg_proc.terminate()
-        if parec_proc:
-            parec_proc.wait()
-        if ffmpeg_proc:
-            ffmpeg_proc.wait()
-
-    if output_file.exists():
-        return output_file
-    return None
+def get_output_path() -> Path:
+    """Get output file path in date-tagged folder."""
+    date_folder = datetime.now().strftime("%y.%m.%d")
+    output_dir = Path(environ["MEDIA"]) / "Records" / date_folder
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%H%M%S")
+    return output_dir / f"{timestamp}.wav"
 
 
-def record_combined(
-    mic_source: str,
-    system_source: str,
-    output_file: Path,
-    sample_rate: int = 16000,
-):
-    """Record both microphone and system audio, then mix them."""
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as sys_tmp:
-        sys_file = Path(sys_tmp.name)
-
-    mic_cmd = [
+def record_parec(
+    source: str, output: Path, sample_rate: int = 16000
+) -> tuple[subprocess.Popen, subprocess.Popen]:
+    """Start parec process recording from source."""
+    parec_cmd = [
         "parec",
         "--device",
-        mic_source,
+        source,
         "--rate",
         str(sample_rate),
         "--channels",
@@ -128,19 +65,7 @@ def record_combined(
         "s16le",
     ]
 
-    sys_cmd = [
-        "parec",
-        "--device",
-        system_source,
-        "--rate",
-        str(sample_rate),
-        "--channels",
-        "1",
-        "--format",
-        "s16le",
-    ]
-
-    mic_ffmpeg_cmd = [
+    ffmpeg_cmd = [
         "ffmpeg",
         "-f",
         "s16le",
@@ -151,105 +76,145 @@ def record_combined(
         "-i",
         "pipe:0",
         "-y",
-        str(mic_file),
+        str(output),
     ]
 
-    sys_ffmpeg_cmd = [
-        "ffmpeg",
-        "-f",
-        "s16le",
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        "1",
-        "-i",
-        "pipe:0",
-        "-y",
-        str(sys_file),
-    ]
+    parec = subprocess.Popen(parec_cmd, stdout=subprocess.PIPE)
+    ffmpeg = subprocess.Popen(
+        ffmpeg_cmd,
+        stdin=parec.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-    mic_parec = None
-    sys_parec = None
-    mic_ffmpeg = None
-    sys_ffmpeg = None
+    if parec.stdout:
+        parec.stdout.close()
 
+    return parec, ffmpeg
+
+
+def wait_and_cleanup(processes: list):
+    """Wait for processes and cleanup on interrupt."""
     try:
-        mic_parec = subprocess.Popen(mic_cmd, stdout=subprocess.PIPE)
-        sys_parec = subprocess.Popen(sys_cmd, stdout=subprocess.PIPE)
-
-        mic_ffmpeg = subprocess.Popen(
-            mic_ffmpeg_cmd,
-            stdin=mic_parec.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        sys_ffmpeg = subprocess.Popen(
-            sys_ffmpeg_cmd,
-            stdin=sys_parec.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        if mic_parec.stdout:
-            mic_parec.stdout.close()
-        if sys_parec.stdout:
-            sys_parec.stdout.close()
-
-        mic_ffmpeg.wait()
-        sys_ffmpeg.wait()
-
+        for _, ffmpeg in processes:
+            ffmpeg.wait()
     except KeyboardInterrupt:
-        for proc in [mic_parec, sys_parec, mic_ffmpeg, sys_ffmpeg]:
-            if proc:
-                proc.terminate()
-        for proc in [mic_parec, sys_parec, mic_ffmpeg, sys_ffmpeg]:
-            if proc:
-                proc.wait()
+        for parec, ffmpeg in processes:
+            if parec:
+                parec.terminate()
+            if ffmpeg:
+                ffmpeg.terminate()
+        for parec, ffmpeg in processes:
+            if parec:
+                parec.wait()
+            if ffmpeg:
+                ffmpeg.wait()
 
+
+def mix_audio_files(file1: Path, file2: Path, output: Path) -> bool:
+    """Mix two audio files into one."""
     mix_cmd = [
         "ffmpeg",
         "-i",
-        str(mic_file),
+        str(file1),
         "-i",
-        str(sys_file),
+        str(file2),
         "-filter_complex",
         "[0:a][1:a]amix=inputs=2:duration=longest[aout]",
         "-map",
         "[aout]",
         "-y",
-        str(output_file),
+        str(output),
     ]
 
-    result = subprocess.run(mix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(
+        mix_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    return result.returncode == 0
+
+
+def record_combined(mic: str, system: str, output: Path, sample_rate: int = 16000) -> Path | None:
+    """Record both mic and system audio, then mix them."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp1:
+        mic_file = Path(tmp1.name)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp2:
+        sys_file = Path(tmp2.name)
+
+    processes = [
+        record_parec(mic, mic_file, sample_rate),
+        record_parec(system, sys_file, sample_rate),
+    ]
+
+    wait_and_cleanup(processes)
+
+    success = mix_audio_files(mic_file, sys_file, output)
 
     mic_file.unlink(missing_ok=True)
     sys_file.unlink(missing_ok=True)
 
-    if result.returncode == 0 and output_file.exists():
-        return output_file
-    return None
+    return output if success and output.exists() else None
+
+
+def record_single(source: str, output: Path, sample_rate: int = 16000) -> Path | None:
+    """Record from single source."""
+    processes = [record_parec(source, output, sample_rate)]
+    wait_and_cleanup(processes)
+    return output if output.exists() else None
 
 
 def main():
-    date_folder = datetime.now().strftime("%y.%m.%d")
-    output_dir = Path(environ["MEDIA"]) / "Records" / date_folder
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%H%M%S")
-    output_file = output_dir / f"{timestamp}.wav"
-
-    result_file = None
+    parser = ArgumentParser(description="Record audio from PulseAudio/PipeWire sources")
+    parser.add_argument(
+        "-c",
+        "--combined",
+        action="store_true",
+        help="Record both mic and system audio (mixed). Default: system audio only",
+    )
+    parser.add_argument(
+        "-r",
+        "--sample-rate",
+        type=int,
+        default=16000,
+        help="Sample rate in Hz (default: 16000)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Output file (default: $MEDIA/Records/YY.MM.DD/HHMMSS.wav)",
+    )
+    args = parser.parse_args()
 
     mic_src, sys_src = get_default_sources()
+    output_file = args.output or get_output_path()
 
-    if mic_src and sys_src:
-        result_file = record_combined(
-            mic_src,
-            sys_src,
-            output_file,
-        )
-    if sys_src:
+    if not sys_src:
+        print("Error: No default system audio source found", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"\n{result_file}")
+    print(f"Recording to: {output_file}")
+    print("Press Ctrl+C to stop recording\n")
+
+    if args.combined and mic_src:
+        print(f"Mic source: {mic_src}")
+        print(f"System source: {sys_src}")
+        result = record_combined(mic_src, sys_src, output_file, args.sample_rate)
+    else:
+        if args.combined and not mic_src:
+            print("Warning: No mic source found, recording system audio only", file=sys.stderr)
+        print(f"System source: {sys_src}")
+        result = record_single(sys_src, output_file, args.sample_rate)
+
+    if result:
+        print(f"\nRecording saved: {result}")
+        print(result)
+    else:
+        print("\nError: Recording failed", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

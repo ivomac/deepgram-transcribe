@@ -22,8 +22,22 @@ from deepgram import (
 
 PID_FILE = Path(environ["HOME"]) / ".cache" / "transcribe.pid"
 
+# Constants for configuration
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_SLEEP_BASE = 1.0
+POLLING_INTERVAL = 0.1
+FINAL_WAIT = 0.5
 
-def chunk_transcript(transcript: str, max_chunk_size: int = 1000) -> list[str]:
+# Deepgram API constants
+DEEPGRAM_MODEL = "nova-3"
+DEEPGRAM_CHANNELS = 1
+DEEPGRAM_SAMPLE_RATE = 16000
+DEEPGRAM_UTTERANCE_END_MS = "1000"
+DEEPGRAM_ENDPOINTING = 300
+DEEPGRAM_API_VERSION = "1"
+
+
+def chunk_transcript(transcript: str, max_chunk_size: int = DEFAULT_CHUNK_SIZE) -> list[str]:
     """
     Split transcript into chunks by sentences/paragraphs.
     Tries to keep sentences and paragraphs together.
@@ -137,7 +151,7 @@ async def cleanup_chunk(
                         f"Timeout on chunk {chunk_index + 1}, attempt {attempt + 1}, retrying...",
                         file=sys.stderr,
                     )
-                    await asyncio.sleep(1 * (attempt + 1))
+                    await asyncio.sleep(DEFAULT_SLEEP_BASE * (attempt + 1))
                 else:
                     print(
                         f"Failed chunk {chunk_index + 1} after {max_retries + 1} attempts",
@@ -149,7 +163,7 @@ async def cleanup_chunk(
                         f"Failure on chunk {chunk_index + 1}, attempt {attempt + 1}, retrying...",
                         file=sys.stderr,
                     )
-                    await asyncio.sleep(1 * (attempt + 1))
+                    await asyncio.sleep(DEFAULT_SLEEP_BASE * (attempt + 1))
                 else:
                     print(f"AI cleanup failed for chunk {chunk_index + 1}: {e}", file=sys.stderr)
                     break
@@ -171,9 +185,9 @@ async def cleanup_chunk(
 async def cleanup_transcript_async(
     transcript: str,
     model: str,
-    timeout: float = 60.0,
-    max_retries: int = 2,
-    max_parallel: int = 3,
+    timeout: float,
+    max_retries: int,
+    max_parallel: int,
 ) -> str:
     """
     Use deepseek-chat via litellm to cleanup and format transcript in parallel chunks.
@@ -217,9 +231,9 @@ async def cleanup_transcript_async(
 def cleanup_transcript(
     transcript: str,
     model: str,
-    timeout: float = 60.0,
-    max_retries: int = 2,
-    max_parallel: int = 3,
+    timeout: float,
+    max_retries: int,
+    max_parallel: int,
 ) -> str:
     """
     Synchronous wrapper for async cleanup_transcript_async.
@@ -275,16 +289,16 @@ class Transcriber:
 
     def from_mic(self) -> str:
         options = LiveOptions(
-            model="nova-3",
+            model=DEEPGRAM_MODEL,
             language="en-US",
             smart_format=True,
             encoding="linear16",
-            channels=1,
-            sample_rate=16000,
+            channels=DEEPGRAM_CHANNELS,
+            sample_rate=DEEPGRAM_SAMPLE_RATE,
             interim_results=True,
-            utterance_end_ms="1000",
+            utterance_end_ms=DEEPGRAM_UTTERANCE_END_MS,
             vad_events=True,
-            endpointing=300,
+            endpointing=DEEPGRAM_ENDPOINTING,
         )
         addons = {"no_delay": "true"}
 
@@ -305,7 +319,7 @@ class Transcriber:
                     finals.clear()
             return
 
-        connection = self.client.listen.websocket.v("1")
+        connection = self.client.listen.websocket.v(DEEPGRAM_API_VERSION)
         connection.on(LiveTranscriptionEvents.Transcript, on_message)
         connection.start(options, addons=addons)
 
@@ -313,8 +327,8 @@ class Transcriber:
         microphone.start()
 
         while RUNNING_STATE:
-            time.sleep(0.1)
-        time.sleep(0.5)
+            time.sleep(POLLING_INTERVAL)
+        time.sleep(FINAL_WAIT)
 
         microphone.finish()
         connection.finish()
@@ -330,14 +344,14 @@ class Transcriber:
         }
 
         options: PrerecordedOptions = PrerecordedOptions(
-            model="nova-3",
+            model=DEEPGRAM_MODEL,
             smart_format=True,
             utterances=True,
             punctuate=True,
             diarize=True,
         )
 
-        data = self.client.listen.rest.v("1").transcribe_file(payload, options)
+        data = self.client.listen.rest.v(DEEPGRAM_API_VERSION).transcribe_file(payload, options)
 
         sentences = []
 

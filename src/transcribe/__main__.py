@@ -8,6 +8,8 @@ from argparse import ArgumentParser
 from os import environ
 from pathlib import Path
 import httpx
+import asyncio
+import re
 
 from deepgram import (
     DeepgramClient,
@@ -19,6 +21,44 @@ from deepgram import (
 )
 
 PID_FILE = Path(environ["HOME"]) / ".cache" / "transcribe.pid"
+
+
+def chunk_transcript(transcript: str, max_chunk_size: int = 1000) -> list[str]:
+    """
+    Split transcript into chunks by sentences/paragraphs.
+    Tries to keep sentences and paragraphs together.
+    """
+    if len(transcript) <= max_chunk_size:
+        return [transcript]
+
+    chunks = []
+    current_chunk = ""
+
+    paragraphs = transcript.split("\n\n")
+
+    for paragraph in paragraphs:
+        if len(paragraph) > max_chunk_size:
+            sentences = re.split(r"(?<=[.!?])\s+", paragraph)
+
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) + 2 <= max_chunk_size:
+                    current_chunk += sentence + " "
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence + " "
+        else:
+            if len(current_chunk) + len(paragraph) + 2 <= max_chunk_size:
+                current_chunk += paragraph + "\n\n"
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = paragraph + "\n\n"
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
 
 
 def notify(title: str, message: str):
@@ -48,12 +88,17 @@ def copy_to_clipboard(text: str):
         print(f"Warning: Failed to copy to clipboard: {e}", file=sys.stderr)
 
 
-def cleanup_transcript(
-    transcript: str, model: str, timeout: float = 30.0, max_retries: int = 2
+async def cleanup_chunk(
+    chunk: str,
+    model: str,
+    timeout: float,
+    max_retries: int,
+    semaphore: asyncio.Semaphore,
+    chunk_index: int,
+    total_chunks: int,
 ) -> str:
     """
-    Use deepseek-chat via litellm to cleanup and format transcript.
-    Includes summary if transcript is long (>500 words).
+    Clean up a single chunk of transcript using litellm.
     """
     try:
         import litellm
@@ -62,54 +107,129 @@ def cleanup_transcript(
 1. Fix any obvious transcription errors or mishearings
 2. Add proper punctuation and capitalization
 3. Break into clear paragraphs where appropriate
-4. Remove filler words (um, uh, like) unless they're essential to meaning
-5. Maintain the speaker's voice and intent"""
+4. Remove filler words and repetitions
+5. Maintain the original message and intent
+6. Do NOT add any commentary, summaries, or notes - just format the text"""
 
-        word_count = len(transcript.split())
-
-        if word_count > 500:
-            system_prompt += "\n6. Add a summary at the beginning"
-
+        message = (
+            f"Please format this transcript chunk ({chunk_index + 1}/{total_chunks}):\n\n{chunk}"
+        )
         for attempt in range(max_retries + 1):
             try:
-                response = litellm.completion(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": f"Please format this transcript:\n\n{transcript}",
-                        },
-                    ],
-                    timeout=timeout,
-                )
+                async with semaphore:
+                    response = await litellm.acompletion(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {
+                                "role": "user",
+                                "content": message,
+                            },
+                        ],
+                        timeout=timeout,
+                    )
 
                 return str(response.choices[0].message.content)
 
             except (httpx.ReadTimeout, httpx.TimeoutException, litellm.exceptions.Timeout):
                 if attempt < max_retries:
-                    print(f"Timeout on attempt {attempt + 1}, retrying...", file=sys.stderr)
-                    time.sleep(1 * (attempt + 1))
+                    print(
+                        f"Timeout on chunk {chunk_index + 1}, attempt {attempt + 1}, retrying...",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(1 * (attempt + 1))
                 else:
                     print(
-                        f"Failed after {max_retries + 1} attempts due to timeout", file=sys.stderr
+                        f"Failed chunk {chunk_index + 1} after {max_retries + 1} attempts",
+                        file=sys.stderr,
                     )
             except Exception as e:
                 if attempt < max_retries and isinstance(e, (httpx.ConnectError, httpx.ReadError)):
-                    print(f"Network error on attempt {attempt + 1}, retrying...", file=sys.stderr)
-                    time.sleep(1 * (attempt + 1))
+                    print(
+                        f"Failure on chunk {chunk_index + 1}, attempt {attempt + 1}, retrying...",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(1 * (attempt + 1))
                 else:
-                    print(f"AI cleanup failed: {e}", file=sys.stderr)
+                    print(f"AI cleanup failed for chunk {chunk_index + 1}: {e}", file=sys.stderr)
                     break
 
-        notify("Transcription", "AI cleanup failed, using original transcript")
-        return transcript
+        print(
+            f"Using original content for chunk {chunk_index + 1} after all retries failed",
+            file=sys.stderr,
+        )
+        return chunk
 
     except ImportError:
         print("Warning: litellm not installed, skipping AI cleanup", file=sys.stderr)
-        return transcript
+        return chunk
     except Exception as e:
-        print(f"Warning: AI cleanup failed: {e}", file=sys.stderr)
+        print(f"Warning: AI cleanup failed for chunk {chunk_index + 1}: {e}", file=sys.stderr)
+        return chunk
+
+
+async def cleanup_transcript_async(
+    transcript: str,
+    model: str,
+    timeout: float = 60.0,
+    max_retries: int = 2,
+    max_parallel: int = 3,
+) -> str:
+    """
+    Use deepseek-chat via litellm to cleanup and format transcript in parallel chunks.
+    """
+    if not transcript.strip():
+        return transcript
+
+    chunks = chunk_transcript(transcript)
+    total_chunks = len(chunks)
+
+    if total_chunks == 1:
+        return await cleanup_chunk(
+            chunks[0], model, timeout, max_retries, asyncio.Semaphore(1), 0, 1
+        )
+
+    print(
+        f"Processing transcript in {total_chunks} chunks with max {max_parallel} parallel calls...",
+        file=sys.stderr,
+    )
+
+    semaphore = asyncio.Semaphore(max_parallel)
+
+    tasks = []
+    for i, chunk in enumerate(chunks):
+        task = cleanup_chunk(chunk, model, timeout, max_retries, semaphore, i, total_chunks)
+        tasks.append(task)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    cleaned_chunks = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"Chunk {i + 1} failed with error: {result}", file=sys.stderr)
+            cleaned_chunks.append(chunks[i])
+        else:
+            cleaned_chunks.append(result)
+
+    return "\n\n".join(cleaned_chunks)
+
+
+def cleanup_transcript(
+    transcript: str,
+    model: str,
+    timeout: float = 60.0,
+    max_retries: int = 2,
+    max_parallel: int = 3,
+) -> str:
+    """
+    Synchronous wrapper for async cleanup_transcript_async.
+    """
+    try:
+        return asyncio.run(
+            cleanup_transcript_async(transcript, model, timeout, max_retries, max_parallel)
+        )
+    except Exception as e:
+        print(f"Error in async cleanup: {e}", file=sys.stderr)
         return transcript
 
 
@@ -236,7 +356,9 @@ class Transcriber:
 
 def main():
     """Start transcribe command."""
-    parser = ArgumentParser(description="Transcribe audio using Deepgram")
+    parser = ArgumentParser(
+        description="Transcribe audio using Deepgram and process output with litellm calls"
+    )
     parser.add_argument("--file", "-f", default=None, help="Path to audio file")
     parser.add_argument(
         "--format",
@@ -289,6 +411,13 @@ def main():
         default=False,
         help="Copy transcript to clipboard",
     )
+    parser.add_argument(
+        "--max-parallel",
+        "-p",
+        type=int,
+        default=3,
+        help="Maximum parallel LLM calls for cleanup (default: 3)",
+    )
     args = parser.parse_args()
 
     running_pid = get_running_pid()
@@ -311,7 +440,11 @@ def main():
             if args.llm:
                 notify("Transcribe", "Cleaning up transcript...")
                 cleaned_transcript = cleanup_transcript(
-                    transcript, model=args.model, timeout=args.timeout, max_retries=args.retries
+                    transcript,
+                    model=args.model,
+                    timeout=args.timeout,
+                    max_retries=args.retries,
+                    max_parallel=args.max_parallel,
                 )
                 if args.keep:
                     transcript = f"{cleaned_transcript}\n\n--- Original below ---\n\n{transcript}"

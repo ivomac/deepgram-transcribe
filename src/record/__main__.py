@@ -196,21 +196,21 @@ def main():
         print("Error: No default system audio source found", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Recording to: {output_file}")
-    print("Press Ctrl+C to stop recording\n")
+    print(f"Recording to: {output_file}", file=sys.stderr)
+    print("Press Ctrl+C to stop recording\n", file=sys.stderr)
 
     if args.combined and mic_src:
-        print(f"Mic source: {mic_src}")
-        print(f"System source: {sys_src}")
+        print(f"Mic source: {mic_src}", file=sys.stderr)
+        print(f"System source: {sys_src}", file=sys.stderr)
         result = record_combined(mic_src, sys_src, output_file, args.sample_rate)
     else:
         if args.combined and not mic_src:
             print("Warning: No mic source found, recording system audio only", file=sys.stderr)
-        print(f"System source: {sys_src}")
+        print(f"System source: {sys_src}", file=sys.stderr)
         result = record_single(sys_src, output_file, args.sample_rate)
 
     if result:
-        print(f"\nRecording saved: {result}")
+        print(f"\nRecording saved: {result}", file=sys.stderr)
         print(result)
     else:
         print("\nError: Recording failed", file=sys.stderr)

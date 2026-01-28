@@ -28,6 +28,11 @@ DEFAULT_SLEEP_BASE = 1.0
 POLLING_INTERVAL = 0.1
 FINAL_WAIT = 0.5
 
+# LLM configuration constants
+DEFAULT_LLM_TIMEOUT = 60.0
+DEFAULT_LLM_RETRIES = 2
+DEFAULT_MAX_PARALLEL = 3
+
 # Deepgram API constants
 DEEPGRAM_MODEL = "nova-3"
 DEEPGRAM_CHANNELS = 1
@@ -276,6 +281,81 @@ def cleanup_transcript(
         return transcript
 
 
+def summarize_transcript(
+    transcript: str,
+    model: str,
+    timeout: float,
+    max_retries: int,
+) -> str:
+    """
+    Generate a summary of the transcript using litellm.
+    """
+    try:
+        import litellm
+
+        system_prompt = """You are a transcript summarizer. You will be given a transcript of speech.
+
+Create a concise summary that captures:
+1. Main topics discussed
+2. Key decisions or conclusions
+3. Important points or arguments
+4. Open questions and required actions
+
+Do not include any concluding or introductory text like "Here is a summary:",
+just provide the summary directly."""
+
+        message = f"Please summarize this transcript:\n\n{transcript}"
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message},
+                    ],
+                    timeout=timeout,
+                )
+
+                return str(response.choices[0].message.content)
+
+            except (httpx.ReadTimeout, httpx.TimeoutException, litellm.exceptions.Timeout):
+                if attempt < max_retries:
+                    print(
+                        f"Timeout on summary, attempt {attempt + 1}, retrying...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(DEFAULT_SLEEP_BASE * (attempt + 1))
+                else:
+                    print(
+                        f"Failed to generate summary after {max_retries + 1} attempts",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                if attempt < max_retries and isinstance(e, (httpx.ConnectError, httpx.ReadError)):
+                    print(
+                        f"Failure on summary, attempt {attempt + 1}, retrying...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(DEFAULT_SLEEP_BASE * (attempt + 1))
+                else:
+                    print(f"AI summary failed: {e}", file=sys.stderr)
+                    break
+
+        print(
+            "Using empty summary after all retries failed",
+            file=sys.stderr,
+        )
+        return ""
+
+    except ImportError:
+        print("Warning: litellm not installed, skipping summary", file=sys.stderr)
+        return ""
+    except Exception as e:
+        print(f"Warning: AI summary failed: {e}", file=sys.stderr)
+        return ""
+
+
 def get_running_pid() -> int | None:
     """Get PID of running transcription process if it exists."""
     if not PID_FILE.exists():
@@ -437,15 +517,15 @@ def main():
         "--timeout",
         "-T",
         type=float,
-        default=60.0,
-        help="Timeout in seconds for LLM requests (default: 60)",
+        default=DEFAULT_LLM_TIMEOUT,
+        help=f"Timeout in seconds for LLM requests (default: {DEFAULT_LLM_TIMEOUT})",
     )
     parser.add_argument(
         "--retries",
         "-r",
         type=int,
-        default=2,
-        help="Number of retries for LLM requests (default: 2)",
+        default=DEFAULT_LLM_RETRIES,
+        help=f"Number of retries for LLM requests (default: {DEFAULT_LLM_RETRIES})",
     )
     parser.add_argument(
         "--copy",
@@ -458,8 +538,15 @@ def main():
         "--max-parallel",
         "-p",
         type=int,
-        default=3,
-        help="Maximum parallel LLM calls for cleanup (default: 3)",
+        default=DEFAULT_MAX_PARALLEL,
+        help=f"Maximum parallel LLM calls for cleanup (default: {DEFAULT_MAX_PARALLEL})",
+    )
+    parser.add_argument(
+        "--summarize",
+        "-s",
+        action="store_true",
+        default=False,
+        help="Generate a summary of the transcript and prepend it",
     )
     args = parser.parse_args()
 
@@ -491,9 +578,26 @@ def main():
                     max_parallel=args.max_parallel,
                 )
                 if args.keep:
-                    transcript = f"{cleaned_transcript}\n\n--- Original below ---\n\n{transcript}"
+                    transcript = (
+                        f"{cleaned_transcript}\n\n=== ORIGINAL TRANSCRIPT ===\n\n{transcript}"
+                    )
                 else:
                     transcript = cleaned_transcript
+
+            if args.summarize:
+                notify("Transcribe", "Generating summary...")
+                summary = summarize_transcript(
+                    transcript,
+                    model=args.model,
+                    timeout=args.timeout,
+                    max_retries=args.retries,
+                )
+                if summary:
+                    transcript = (
+                        f"=== SUMMARY ===\n\n{summary}\n\n=== TRANSCRIPT ===\n\n{transcript}"
+                    )
+                else:
+                    print("Warning: Failed to generate summary", file=sys.stderr)
 
             print(transcript)
             if args.copy:

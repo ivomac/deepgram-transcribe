@@ -115,7 +115,6 @@ def cleanup_pid():
     PID_FILE.unlink(missing_ok=True)
 
 
-
 def signal_handler(*_):
     global RUNNING_STATE
     RUNNING_STATE = False
@@ -235,6 +234,13 @@ def main():
         default="deepseek/deepseek-chat",
         help="Choose litellm model",
     )
+    parser.add_argument(
+        "--keep",
+        "-k",
+        action="store_true",
+        default=False,
+        help="Keep original transcript when using --llm",
+    )
     args = parser.parse_args()
 
     running_pid = get_running_pid()
@@ -256,7 +262,11 @@ def main():
         if transcript.strip():
             if args.llm:
                 notify("Transcribe", "Cleaning up transcript...")
-                transcript = cleanup_transcript(transcript, model=args.model)
+                cleaned_transcript = cleanup_transcript(transcript, model=args.model)
+                if args.keep:
+                    transcript = f"{cleaned_transcript}\n\n--- Original below ---\n\n{transcript}"
+                else:
+                    transcript = cleaned_transcript
 
             copy_to_clipboard(transcript)
             print(transcript)

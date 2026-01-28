@@ -282,6 +282,13 @@ def main():
         default=2,
         help="Number of retries for LLM requests (default: 2)",
     )
+    parser.add_argument(
+        "--copy",
+        "-c",
+        action="store_true",
+        default=False,
+        help="Copy transcript to clipboard",
+    )
     args = parser.parse_args()
 
     running_pid = get_running_pid()
@@ -311,9 +318,12 @@ def main():
                 else:
                     transcript = cleaned_transcript
 
-            copy_to_clipboard(transcript)
             print(transcript)
-            notify("Transcribe", "Transcription copied to clipboard")
+            if args.copy:
+                copy_to_clipboard(transcript)
+                notify("Transcribe", "Transcription copied to clipboard")
+            else:
+                notify("Transcribe", "Transcription complete")
         else:
             notify("Transcribe", "No transcription recorded")
 

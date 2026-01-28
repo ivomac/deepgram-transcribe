@@ -246,10 +246,10 @@ def main():
 
         write_pid()
 
-        notify("Transcribe", "Transcribing...")
         transcriber = Transcriber()
+        notify("Transcribe", "Transcribing...")
         if args.file:
-            transcript = transcriber.from_file(args.file, args.fmt)
+            transcript = transcriber.from_file(args.file, args.format)
         else:
             transcript = transcriber.from_mic()
 

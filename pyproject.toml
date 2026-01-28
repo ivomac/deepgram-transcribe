@@ -14,4 +14,15 @@ dependencies = [
 ]
 
 [project.scripts]
-transcribe = "transcribe:main"
+record = "record.__main__:main"
+transcribe = "transcribe.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+package = true
+

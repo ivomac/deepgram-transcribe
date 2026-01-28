@@ -110,6 +110,7 @@ async def cleanup_chunk(
     semaphore: asyncio.Semaphore,
     chunk_index: int,
     total_chunks: int,
+    formatting_str: str,
 ) -> str:
     """
     Clean up a single chunk of transcript using litellm.
@@ -117,13 +118,35 @@ async def cleanup_chunk(
     try:
         import litellm
 
-        system_prompt = """You are a transcript formatter. Your task is to:
-1. Fix any obvious transcription errors or mishearings
-2. Add proper punctuation and capitalization
-3. Break into clear paragraphs where appropriate
-4. Remove filler words and repetitions
-5. Maintain the original message and intent
-6. Do NOT add any commentary, summaries, or notes - just format the text"""
+        system_prompt = f"""
+You are a transcript formatter. You will be given an AI transcript of speech.
+
+The transcript uses the following format per sentence:
+
+{formatting_str}
+
+PRESERVE:
+- Speaker IDs and timing markers if included in the original sentence formatting
+- Original message and intent
+
+FORMAT:
+- Add proper punctuation and capitalization
+- Combine adjacent sentences from the same speaker into paragraphs
+
+REMOVE:
+- Pure filler words ("um", "uh", "like, you know" if meaningless)
+- False starts where speaker immediately restarts
+- Meaningless repetitions
+
+FIX:
+- Obvious transcription errors or mishearings
+- Grammar if it doesn't change meaning
+
+DO NOT:
+- Add any intro, outro, or explanation
+- Use markdown formatting (**, ##, etc.)
+- Editorialize or interpret
+"""
 
         message = (
             f"Please format this transcript chunk ({chunk_index + 1}/{total_chunks}):\n\n{chunk}"
@@ -188,6 +211,7 @@ async def cleanup_transcript_async(
     timeout: float,
     max_retries: int,
     max_parallel: int,
+    formatting_str: str,
 ) -> str:
     """
     Use deepseek-chat via litellm to cleanup and format transcript in parallel chunks.
@@ -200,7 +224,7 @@ async def cleanup_transcript_async(
 
     if total_chunks == 1:
         return await cleanup_chunk(
-            chunks[0], model, timeout, max_retries, asyncio.Semaphore(1), 0, 1
+            chunks[0], model, timeout, max_retries, asyncio.Semaphore(1), 0, 1, formatting_str
         )
 
     print(
@@ -212,7 +236,9 @@ async def cleanup_transcript_async(
 
     tasks = []
     for i, chunk in enumerate(chunks):
-        task = cleanup_chunk(chunk, model, timeout, max_retries, semaphore, i, total_chunks)
+        task = cleanup_chunk(
+            chunk, model, timeout, max_retries, semaphore, i, total_chunks, formatting_str
+        )
         tasks.append(task)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -234,13 +260,16 @@ def cleanup_transcript(
     timeout: float,
     max_retries: int,
     max_parallel: int,
+    formatting_str: str,
 ) -> str:
     """
     Synchronous wrapper for async cleanup_transcript_async.
     """
     try:
         return asyncio.run(
-            cleanup_transcript_async(transcript, model, timeout, max_retries, max_parallel)
+            cleanup_transcript_async(
+                transcript, model, timeout, max_retries, max_parallel, formatting_str
+            )
         )
     except Exception as e:
         print(f"Error in async cleanup: {e}", file=sys.stderr)
@@ -457,6 +486,7 @@ def main():
                     transcript,
                     model=args.model,
                     timeout=args.timeout,
+                    formatting_str=args.format,
                     max_retries=args.retries,
                     max_parallel=args.max_parallel,
                 )

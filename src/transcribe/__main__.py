@@ -240,12 +240,12 @@ def main():
     parser.add_argument("--file", "-f", default=None, help="Path to audio file")
     parser.add_argument(
         "--format",
-        "-t",
+        "-F",
         default="{text}",
-        help="""Only works with -f. Examples:
+        help="""Only works with --file. Examples:
     "{text}"
     "{start:.2f}-{end:.2f} {text}"
-    "S{speaker} [{start:.2f}-{end:.2f}] {text}"
+    "S{speaker} [{start:.2f}-{end:.2f}]: {text}"
         """,
     )
     parser.add_argument(

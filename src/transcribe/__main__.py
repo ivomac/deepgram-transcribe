@@ -7,6 +7,7 @@ import time
 from argparse import ArgumentParser
 from os import environ
 from pathlib import Path
+import httpx
 
 from deepgram import (
     DeepgramClient,
@@ -47,13 +48,15 @@ def copy_to_clipboard(text: str):
         print(f"Warning: Failed to copy to clipboard: {e}", file=sys.stderr)
 
 
-def cleanup_transcript(transcript: str, model: str) -> str:
+def cleanup_transcript(
+    transcript: str, model: str, timeout: float = 30.0, max_retries: int = 2
+) -> str:
     """
     Use deepseek-chat via litellm to cleanup and format transcript.
     Includes summary if transcript is long (>500 words).
     """
     try:
-        from litellm import completion
+        import litellm
 
         system_prompt = """You are a transcript formatter. Your task is to:
 1. Fix any obvious transcription errors or mishearings
@@ -67,18 +70,40 @@ def cleanup_transcript(transcript: str, model: str) -> str:
         if word_count > 500:
             system_prompt += "\n6. Add a summary at the beginning"
 
-        response = completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Please format this transcript:\n\n{transcript}",
-                },
-            ],
-        )
+        for attempt in range(max_retries + 1):
+            try:
+                response = litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": f"Please format this transcript:\n\n{transcript}",
+                        },
+                    ],
+                    timeout=timeout,
+                )
 
-        return str(response.choices[0].message.content)
+                return str(response.choices[0].message.content)
+
+            except (httpx.ReadTimeout, httpx.TimeoutException, litellm.exceptions.Timeout):
+                if attempt < max_retries:
+                    print(f"Timeout on attempt {attempt + 1}, retrying...", file=sys.stderr)
+                    time.sleep(1 * (attempt + 1))
+                else:
+                    print(
+                        f"Failed after {max_retries + 1} attempts due to timeout", file=sys.stderr
+                    )
+            except Exception as e:
+                if attempt < max_retries and isinstance(e, (httpx.ConnectError, httpx.ReadError)):
+                    print(f"Network error on attempt {attempt + 1}, retrying...", file=sys.stderr)
+                    time.sleep(1 * (attempt + 1))
+                else:
+                    print(f"AI cleanup failed: {e}", file=sys.stderr)
+                    break
+
+        notify("Transcription", "AI cleanup failed, using original transcript")
+        return transcript
 
     except ImportError:
         print("Warning: litellm not installed, skipping AI cleanup", file=sys.stderr)
@@ -146,7 +171,9 @@ class Transcriber:
         transcript = []
         finals = []
 
-        def on_message(_, result, **__):
+        def on_message(_, result, **kwargs):
+            if kwargs:
+                pass
             nonlocal finals, transcript
             sentence = result.channel.alternatives[0].transcript
             if len(sentence) == 0:
@@ -241,6 +268,20 @@ def main():
         default=False,
         help="Keep original transcript when using --llm",
     )
+    parser.add_argument(
+        "--timeout",
+        "-T",
+        type=float,
+        default=60.0,
+        help="Timeout in seconds for LLM requests (default: 60)",
+    )
+    parser.add_argument(
+        "--retries",
+        "-r",
+        type=int,
+        default=2,
+        help="Number of retries for LLM requests (default: 2)",
+    )
     args = parser.parse_args()
 
     running_pid = get_running_pid()
@@ -262,7 +303,9 @@ def main():
         if transcript.strip():
             if args.llm:
                 notify("Transcribe", "Cleaning up transcript...")
-                cleaned_transcript = cleanup_transcript(transcript, model=args.model)
+                cleaned_transcript = cleanup_transcript(
+                    transcript, model=args.model, timeout=args.timeout, max_retries=args.retries
+                )
                 if args.keep:
                     transcript = f"{cleaned_transcript}\n\n--- Original below ---\n\n{transcript}"
                 else:
